@@ -44,7 +44,7 @@ class TelemetrySettingsDialog(QtWidgets.QDialog):
         columns_layout = QtWidgets.QFormLayout()
         self.columns_edit = QtWidgets.QLineEdit("nxyz")
         self.columns_edit.setToolTip(
-            "Формат: nxyz\nn - название камеры\nx - координата X\ny - координата Y\nz - координата Z")
+            "Формат: nxyz\nn - название камеры\nx - координата X\ny - координата Y\nz - координата Z\n| - пропуск столбца")
         columns_layout.addRow("Формат столбцов:", self.columns_edit)
         columns_group.setLayout(columns_layout)
         layout.addWidget(columns_group)
@@ -131,21 +131,15 @@ class MetashapeProcessor(QtCore.QThread):
             self.align_photos(chunk)
             self.progress_updated.emit(50)
 
-            # Построение плотного облака точек
-            if self.settings.get('build_dense_cloud', True):
-                self.status_updated.emit("Построение плотного облака точек...")
-                self.build_dense_cloud(chunk)
-                self.progress_updated.emit(70)
+            self.status_updated.emit("Построение плотного облака точек...")
+            self.build_dense_cloud(chunk)
+            self.progress_updated.emit(70)
 
-                # Построение mesh
-                self.status_updated.emit("Построение полигональной модели...")
-                self.build_mesh(chunk)
-                self.progress_updated.emit(85)
+            # Построение mesh
+            self.status_updated.emit("Построение Ортофотоплана...")
+            self.build_Ortofotoplan(chunk)
+            self.progress_updated.emit(85)
 
-                # Построение текстуры
-                self.status_updated.emit("Построение текстуры...")
-                self.build_texture(chunk)
-                self.progress_updated.emit(90)
 
             # Экспорт ортофотоплана
             self.status_updated.emit("Экспорт ортофотоплана...")
@@ -169,7 +163,10 @@ class MetashapeProcessor(QtCore.QThread):
             image_list.extend(Path(self.images_folder).glob(f"*{ext}"))
             image_list.extend(Path(self.images_folder).glob(f"*{ext.upper()}"))
 
-        photo_list = [str(img) for img in image_list]
+        photo_list = []
+        for image in image_list:
+            if str(image) not in photo_list:
+                photo_list.append(str(image))
 
         if not photo_list:
             raise Exception(f"Изображения не найдены в папке: {self.images_folder}")
@@ -191,10 +188,68 @@ class MetashapeProcessor(QtCore.QThread):
                                   columns=telemetry_settings['columns'],
                                   delimiter=telemetry_settings['delimiter'],
                                   crs=Metashape.CoordinateSystem(telemetry_settings['crs']))
+            s=chunk.cameras
+            for i in s:
+                i.reference.enabled = True
         except Exception as e:
             print(f"Предупреждение: Не удалось загрузить телеметрию: {e}")
 
-    # ... остальные методы класса MetashapeProcessor остаются без изменений ...
+    def match_photos(self, chunk):
+        accuracy = self.get_accuracy()
+
+        chunk.matchPhotos(downscale=self.get_downscale(accuracy),
+                          generic_preselection=self.settings.get('generic_preselection', True),
+                          reference_preselection=self.settings.get('reference_preselection', True))
+
+    def align_photos(self, chunk):
+        chunk.alignCameras(adaptive_fitting=self.settings.get('adaptive_fitting', True))
+
+    def build_dense_cloud(self, chunk):
+        quality = self.get_quality()
+
+        chunk.buildDepthMaps(downscale=self.get_downscale(quality),
+                                 filter_mode=Metashape.FilterMode.AggressiveFiltering)
+        chunk.buildPointCloud(source_data = Metashape.DepthMapsData)
+
+    def build_Ortofotoplan(self, chunk):
+        chunk.buildOrthomosaic(surface_data=Metashape.PointCloudData,fill_holes=True)
+
+
+    def export_orthophoto(self, chunk):
+
+        chunk.crs = Metashape.CoordinateSystem("EPSG::3857")
+
+        output_file = os.path.join(self.output_path, "orthophoto.gpkg")
+
+
+        chunk.exportRaster(path=output_file,
+                            source_data=Metashape.DataSource.OrthomosaicData,
+                            image_format=Metashape.ImageFormat.GeoPackage,
+                            raster_transform=Metashape.RasterTransform.RasterTransformNone,
+                            save_alpha=False)
+        return output_file
+
+    def get_accuracy(self):
+        """Получение точности"""
+        accuracy_map = {
+            'HighAccuracy': 0,
+            'MediumAccuracy': 1,
+            'LowAccuracy': 2
+        }
+        return accuracy_map.get(self.settings.get('accuracy', 'HighAccuracy'), 0)
+
+    def get_quality(self):
+        """Получение качества"""
+        quality_map = {
+            'HighQuality': 1,
+            'MediumQuality': 2,
+            'LowQuality': 4
+        }
+        return quality_map.get(self.settings.get('dense_cloud_quality', 'MediumQuality'), 2)
+
+    def get_downscale(self, level):
+        """Получение коэффициента масштабирования"""
+        return level
 
 
 class OrthophotoSettingsDialog(QtWidgets.QDialog):
@@ -336,15 +391,13 @@ class OrthophotoWidget(QtWidgets.QWidget):
         layout.addWidget(output_group)
 
         # Кнопка настроек
-        settings_btn = QtWidgets.QPushButton("⚙️")
-        settings_btn.setMaximumWidth(25)
+        settings_btn = QtWidgets.QPushButton("Настройки")
         settings_btn.setToolTip("Настройки обработки")
         settings_btn.clicked.connect(self.open_settings)
         layout.addWidget(settings_btn)
 
         # Кнопка запуска
-        self.start_btn = QtWidgets.QPushButton("🚀 Создать")
-        self.start_btn.setStyleSheet("QPushButton { font-weight: bold; background-color: #3498db; color: white; }")
+        self.start_btn = QtWidgets.QPushButton("Создать ортофотоплан")
         self.start_btn.clicked.connect(self.start_processing)
         layout.addWidget(self.start_btn)
 
@@ -371,7 +424,7 @@ class OrthophotoWidget(QtWidgets.QWidget):
             'adaptive_fitting': True,
             'build_dense_cloud': True,
             'telemetry_settings': {
-                'delimiter': ',',
+                'delimiter': '\t',
                 'columns': 'nxyz',
                 'crs': 'EPSG::4326'
             }
@@ -455,6 +508,7 @@ class OrthophotoWidget(QtWidgets.QWidget):
     def start_processing(self):
         """Запуск обработки"""
         if not self.validate_inputs():
+            print("not Valid Inputs!")
             return
 
         # Если указан файл телеметрии, запрашиваем настройки импорта
