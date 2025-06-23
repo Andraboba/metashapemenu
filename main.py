@@ -16,7 +16,6 @@ class TelemetrySettingsDialog(QtWidgets.QDialog):
     def init_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
 
-        # Система координат
         crs_group = QtWidgets.QGroupBox("Система координат")
         crs_layout = QtWidgets.QVBoxLayout()
         self.crs_combo = QtWidgets.QComboBox()
@@ -30,7 +29,6 @@ class TelemetrySettingsDialog(QtWidgets.QDialog):
         crs_group.setLayout(crs_layout)
         layout.addWidget(crs_group)
 
-        # Разделитель
         delimiter_group = QtWidgets.QGroupBox("Разделитель")
         delimiter_layout = QtWidgets.QHBoxLayout()
         self.delimiter_combo = QtWidgets.QComboBox()
@@ -39,7 +37,7 @@ class TelemetrySettingsDialog(QtWidgets.QDialog):
         delimiter_group.setLayout(delimiter_layout)
         layout.addWidget(delimiter_group)
 
-        # Столбцы
+
         columns_group = QtWidgets.QGroupBox("Расположение столбцов")
         columns_layout = QtWidgets.QFormLayout()
         self.columns_edit = QtWidgets.QLineEdit("nxyz")
@@ -49,7 +47,6 @@ class TelemetrySettingsDialog(QtWidgets.QDialog):
         columns_group.setLayout(columns_layout)
         layout.addWidget(columns_group)
 
-        # Кнопки
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -67,12 +64,11 @@ class TelemetrySettingsDialog(QtWidgets.QDialog):
         }
         delimiter = delimiter_map[self.delimiter_combo.currentText()]
 
-        # Получаем систему координат
         crs_map = {
             "EPSG::4326 (WGS 84)": "EPSG::4326",
             "EPSG::3857 (Web Mercator)": "EPSG::3857",
             "EPSG::32637 (WGS 84 / UTM zone 37N)": "EPSG::32637",
-            "Другая...": "EPSG::4326"  # По умолчанию, можно добавить выбор другой CRS
+            "Другая...": "EPSG::4326"
         }
         crs = crs_map[self.crs_combo.currentText()]
 
@@ -90,58 +86,65 @@ class MetashapeProcessor(QtCore.QThread):
     status_updated = QtCore.Signal(str)
     finished_successfully = QtCore.Signal(bool, str)
 
-    def __init__(self, images_folder, telemetry_file, output_path, settings):
+    def __init__(self, images_folder, telemetry_file, output_path, settings, path,name):
         super().__init__()
         self.images_folder = images_folder
         self.telemetry_file = telemetry_file
         self.output_path = output_path
         self.settings = settings
         self.doc = Metashape.app.document
+        self.project_path = path
+        self.project_name = name
 
     def run(self):
         """Основная функция обработки"""
         try:
-            # Создание нового chunk если документ пустой
-            if not self.doc.chunks:
-                self.status_updated.emit("Создание нового chunk...")
-                chunk = self.doc.addChunk()
-            else:
-                chunk = self.doc.chunk
+
+            doc = Metashape.app.document
+            doc.save(self.project_path)
+            chunk = doc.chunk
 
             self.progress_updated.emit(5)
 
-            # Загрузка изображений
             self.status_updated.emit("Загрузка изображений...")
             self.load_images(chunk)
             self.progress_updated.emit(15)
 
-            # Загрузка телеметрии если есть
+
+
             if self.telemetry_file and os.path.exists(self.telemetry_file):
                 self.status_updated.emit("Загрузка телеметрии...")
                 self.load_telemetry(chunk)
                 self.progress_updated.emit(20)
+            doc.save(self.project_path)
 
-            # Поиск особых точек и выравнивание
             self.status_updated.emit("Поиск особых точек...")
             self.match_photos(chunk)
-            self.progress_updated.emit(35)
+            self.progress_updated.emit(30)
 
-            # Выравнивание фотографий
             self.status_updated.emit("Выравнивание фотографий...")
             self.align_photos(chunk)
-            self.progress_updated.emit(50)
+            self.progress_updated.emit(45)
+
 
             self.status_updated.emit("Построение плотного облака точек...")
             self.build_dense_cloud(chunk)
+            self.progress_updated.emit(60)
+
+            doc.save()
+
+            self.status_updated.emit("Построение ЦММ...")
+            self.build_Dem(chunk)
             self.progress_updated.emit(70)
 
-            # Построение mesh
+
+
             self.status_updated.emit("Построение Ортофотоплана...")
             self.build_Ortofotoplan(chunk)
             self.progress_updated.emit(85)
 
+            doc.save()
 
-            # Экспорт ортофотоплана
             self.status_updated.emit("Экспорт ортофотоплана...")
             output_file = self.export_orthophoto(chunk)
             self.progress_updated.emit(100)
@@ -153,6 +156,7 @@ class MetashapeProcessor(QtCore.QThread):
             error_msg = f"Ошибка обработки: {str(e)}"
             self.status_updated.emit(error_msg)
             self.finished_successfully.emit(False, error_msg)
+
 
     def load_images(self, chunk):
         """Загрузка изображений в chunk"""
@@ -176,7 +180,6 @@ class MetashapeProcessor(QtCore.QThread):
     def load_telemetry(self, chunk):
         """Загрузка телеметрии"""
         try:
-            # Получаем настройки импорта
             telemetry_settings = self.settings.get('telemetry_settings', {
                 'delimiter': ',',
                 'columns': 'nxyz',
@@ -209,43 +212,53 @@ class MetashapeProcessor(QtCore.QThread):
 
         chunk.buildDepthMaps(downscale=self.get_downscale(quality),
                                  filter_mode=Metashape.FilterMode.AggressiveFiltering)
-        chunk.buildPointCloud(source_data = Metashape.DepthMapsData)
+        chunk.buildPointCloud()
+
+    def build_Dem(self, chunk):
+        chunk.buildDem(source_data=Metashape.PointCloudData, interpolation=Metashape.EnabledInterpolation)
+
 
     def build_Ortofotoplan(self, chunk):
-        chunk.buildOrthomosaic(surface_data=Metashape.PointCloudData,fill_holes=True)
+        chunk.buildOrthomosaic(surface_data=Metashape.PointCloudData)
 
 
     def export_orthophoto(self, chunk):
 
-        chunk.crs = Metashape.CoordinateSystem("EPSG::3857")
+        out_projection = Metashape.OrthoProjection()
+        out_projection.type = Metashape.OrthoProjection.Type.Planar
+        out_projection.crs = Metashape.CoordinateSystem("EPSG::3857")
+        name = self.project_name
 
-        output_file = os.path.join(self.output_path, "orthophoto.gpkg")
-
+        output_file = os.path.join(self.output_path, name+".gpkg")
 
         chunk.exportRaster(path=output_file,
-                            source_data=Metashape.DataSource.OrthomosaicData,
-                            image_format=Metashape.ImageFormat.GeoPackage,
-                            raster_transform=Metashape.RasterTransform.RasterTransformNone,
-                            save_alpha=False)
+                           source_data=Metashape.OrthomosaicData,
+                           format=Metashape.RasterFormatGeoPackage,
+                           raster_transform=Metashape.RasterTransformNone,
+                           save_alpha=False,projection=out_projection)
+
         return output_file
 
     def get_accuracy(self):
         """Получение точности"""
         accuracy_map = {
-            'HighAccuracy': 0,
-            'MediumAccuracy': 1,
-            'LowAccuracy': 2
+            'HighestAccuracy': 0,
+            'HighAccuracy': 1,
+            'MediumAccuracy': 2,
+            'LowAccuracy': 3
         }
-        return accuracy_map.get(self.settings.get('accuracy', 'HighAccuracy'), 0)
+        return accuracy_map.get(self.settings.get('accuracy', 'HighAccuracy'), 1)
 
     def get_quality(self):
         """Получение качества"""
         quality_map = {
-            'HighQuality': 1,
-            'MediumQuality': 2,
-            'LowQuality': 4
+            'UltraHighQuality':1,
+            'HighQuality': 2,
+            'MediumQuality': 4,
+            'LowQuality':8,
+            "LowestQuality":16
         }
-        return quality_map.get(self.settings.get('dense_cloud_quality', 'MediumQuality'), 2)
+        return quality_map.get(self.settings.get('dense_cloud_quality', 'MediumQuality'), 4)
 
     def get_downscale(self, level):
         """Получение коэффициента масштабирования"""
@@ -267,30 +280,21 @@ class OrthophotoSettingsDialog(QtWidgets.QDialog):
 
         layout = QtWidgets.QVBoxLayout(self)
 
-        # Основные настройки
         main_group = QtWidgets.QGroupBox("Основные параметры")
         main_layout = QtWidgets.QFormLayout(main_group)
 
-        # Точность выравнивания
         self.accuracy_combo = QtWidgets.QComboBox()
-        self.accuracy_combo.addItems(["HighAccuracy", "MediumAccuracy", "LowAccuracy"])
+        self.accuracy_combo.addItems(['HighestAccuracy','HighAccuracy','MediumAccuracy','LowAccuracy'])
         main_layout.addRow("Точность выравнивания:", self.accuracy_combo)
 
-        # Качество плотного облака
         self.quality_combo = QtWidgets.QComboBox()
-        self.quality_combo.addItems(["HighQuality", "MediumQuality", "LowQuality"])
+        self.quality_combo.addItems(['UltraHighQuality',"HighQuality", "MediumQuality", "LowQuality","LowestQuality"])
         self.quality_combo.setCurrentText("MediumQuality")
         main_layout.addRow("Качество плотного облака:", self.quality_combo)
 
-        # Размер текстуры
-        self.texture_size_combo = QtWidgets.QComboBox()
-        self.texture_size_combo.addItems(["2048", "4096", "8192", "16384"])
-        self.texture_size_combo.setCurrentText("4096")
-        main_layout.addRow("Размер текстуры:", self.texture_size_combo)
 
         layout.addWidget(main_group)
 
-        # Дополнительные опции
         advanced_group = QtWidgets.QGroupBox("Дополнительные опции")
         advanced_layout = QtWidgets.QFormLayout(advanced_group)
 
@@ -306,9 +310,6 @@ class OrthophotoSettingsDialog(QtWidgets.QDialog):
         self.adaptive_fitting_cb.setChecked(True)
         advanced_layout.addRow("Адаптивная подгонка:", self.adaptive_fitting_cb)
 
-        self.build_dense_cloud_cb = QtWidgets.QCheckBox()
-        self.build_dense_cloud_cb.setChecked(True)
-        advanced_layout.addRow("Строить плотное облако:", self.build_dense_cloud_cb)
 
         layout.addWidget(advanced_group)
 
@@ -323,11 +324,9 @@ class OrthophotoSettingsDialog(QtWidgets.QDialog):
         return {
             'accuracy': self.accuracy_combo.currentText(),
             'dense_cloud_quality': self.quality_combo.currentText(),
-            'texture_size': int(self.texture_size_combo.currentText()),
             'generic_preselection': self.generic_preselection_cb.isChecked(),
             'reference_preselection': self.reference_preselection_cb.isChecked(),
             'adaptive_fitting': self.adaptive_fitting_cb.isChecked(),
-            'build_dense_cloud': self.build_dense_cloud_cb.isChecked()
         }
 
 
@@ -341,88 +340,105 @@ class OrthophotoWidget(QtWidgets.QWidget):
         self.init_ui()
 
     def init_ui(self):
-        """Инициализация компактного интерфейса"""
         layout = QtWidgets.QVBoxLayout(self)
 
-        # Группа входных данных
         input_group = QtWidgets.QGroupBox("Входные данные")
         input_layout = QtWidgets.QVBoxLayout()
 
-        # Папка изображений
         images_layout = QtWidgets.QHBoxLayout()
         self.images_folder_edit = QtWidgets.QLineEdit()
         self.images_folder_edit.setPlaceholderText("Папка со снимками...")
         images_layout.addWidget(self.images_folder_edit)
 
-        images_btn = QtWidgets.QPushButton("обзор")
-        images_btn.setToolTip("Выбрать папку со снимками")
-        images_btn.clicked.connect(self.select_images_folder)
-        images_layout.addWidget(images_btn)
+        self.images_btn = QtWidgets.QPushButton("обзор")
+        self.images_btn.setToolTip("Выбрать папку со снимками")
+        self.images_btn.clicked.connect(self.select_images_folder)
+        images_layout.addWidget(self.images_btn)
         input_layout.addLayout(images_layout)
 
-        # Файл телеметрии
         telemetry_layout = QtWidgets.QHBoxLayout()
         self.telemetry_file_edit = QtWidgets.QLineEdit()
         self.telemetry_file_edit.setPlaceholderText("Файл телеметрии (опционально)...")
         telemetry_layout.addWidget(self.telemetry_file_edit)
 
-        telemetry_btn = QtWidgets.QPushButton("обзор")
-        telemetry_btn.setToolTip("Выбрать файл телеметрии")
-        telemetry_btn.clicked.connect(self.select_telemetry_file)
-        telemetry_layout.addWidget(telemetry_btn)
+        self.telemetry_btn = QtWidgets.QPushButton("обзор")
+        self.telemetry_btn.setToolTip("Выбрать файл телеметрии")
+        self.telemetry_btn.clicked.connect(self.select_telemetry_file)
+        telemetry_layout.addWidget(self.telemetry_btn)
         input_layout.addLayout(telemetry_layout)
 
         input_group.setLayout(input_layout)
         layout.addWidget(input_group)
 
-        # Группа выходных данных
         output_group = QtWidgets.QGroupBox("Выходные данные")
-        output_layout = QtWidgets.QHBoxLayout()
+        output_layout = QtWidgets.QVBoxLayout()
 
+        folder_layout = QtWidgets.QHBoxLayout()
         self.output_folder_edit = QtWidgets.QLineEdit()
         self.output_folder_edit.setPlaceholderText("Папка для сохранения...")
-        output_layout.addWidget(self.output_folder_edit)
+        folder_layout.addWidget(self.output_folder_edit)
 
-        output_btn = QtWidgets.QPushButton("обзор")
-        output_btn.setToolTip("Выбрать папку для сохранения")
-        output_btn.clicked.connect(self.select_output_folder)
-        output_layout.addWidget(output_btn)
+        self.output_btn = QtWidgets.QPushButton("обзор")
+        self.output_btn.setToolTip("Выбрать папку для сохранения")
+        self.output_btn.clicked.connect(self.select_output_folder)
+        folder_layout.addWidget(self.output_btn)
+        output_layout.addLayout(folder_layout)
+
+        project_layout = QtWidgets.QHBoxLayout()
+        self.project_label = QtWidgets.QLabel("Название проекта:")
+        self.project_label.setMinimumWidth(120)
+        project_layout.addWidget(self.project_label)
+
+        self.project_name_edit = QtWidgets.QLineEdit()
+        self.project_name_edit.setPlaceholderText("Введите название проекта...")
+        project_layout.addWidget(self.project_name_edit)
+        output_layout.addLayout(project_layout)
+
         output_group.setLayout(output_layout)
         layout.addWidget(output_group)
 
-        # Кнопка настроек
-        settings_btn = QtWidgets.QPushButton("Настройки")
-        settings_btn.setToolTip("Настройки обработки")
-        settings_btn.clicked.connect(self.open_settings)
-        layout.addWidget(settings_btn)
+        self.settings_btn = QtWidgets.QPushButton("Настройки")
+        self.settings_btn.setToolTip("Настройки обработки")
+        self.settings_btn.clicked.connect(self.open_settings)
+        layout.addWidget(self.settings_btn)
 
-        # Кнопка запуска
         self.start_btn = QtWidgets.QPushButton("Создать ортофотоплан")
         self.start_btn.clicked.connect(self.start_processing)
         layout.addWidget(self.start_btn)
 
-        # Прогресс бар (скрытый)
         self.progress_bar = QtWidgets.QProgressBar()
-        self.progress_bar.setMaximumWidth(80)
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
 
-        # Статус
         self.status_label = QtWidgets.QLabel("Готов")
-        self.status_label.setMaximumWidth(80)
         self.status_label.setStyleSheet("color: #27ae60;")
         layout.addWidget(self.status_label)
+
+    def get_project_path(self):
+        """Возвращает полный путь к проекту"""
+        base_path = self.output_folder_edit.text().strip()
+        project_name = self.project_name_edit.text().strip()
+
+        if not base_path:
+            return None
+        if not project_name:
+            project_name = "project"
+
+        if project_name.lower().endswith('.psx'):
+            project_name = project_name[:-4]
+
+        project_name += '.psx'
+
+        return os.path.join(base_path, project_name)
 
     def get_default_settings(self):
         """Настройки по умолчанию"""
         return {
             'accuracy': 'HighAccuracy',
             'dense_cloud_quality': 'MediumQuality',
-            'texture_size': 4096,
             'generic_preselection': True,
             'reference_preselection': True,
             'adaptive_fitting': True,
-            'build_dense_cloud': True,
             'telemetry_settings': {
                 'delimiter': '\t',
                 'columns': 'nxyz',
@@ -457,14 +473,12 @@ class OrthophotoWidget(QtWidgets.QWidget):
         """Открытие диалога настроек"""
         dialog = OrthophotoSettingsDialog(self)
 
-        # Установка текущих настроек
+
         dialog.accuracy_combo.setCurrentText(self.settings['accuracy'])
         dialog.quality_combo.setCurrentText(self.settings['dense_cloud_quality'])
-        dialog.texture_size_combo.setCurrentText(str(self.settings['texture_size']))
         dialog.generic_preselection_cb.setChecked(self.settings['generic_preselection'])
         dialog.reference_preselection_cb.setChecked(self.settings['reference_preselection'])
         dialog.adaptive_fitting_cb.setChecked(self.settings['adaptive_fitting'])
-        dialog.build_dense_cloud_cb.setChecked(self.settings['build_dense_cloud'])
 
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
             self.settings = dialog.get_settings()
@@ -490,7 +504,6 @@ class OrthophotoWidget(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.warning(self, "Ошибка", "Не удалось создать папку для сохранения!")
                 return False
 
-        # Проверка наличия изображений
         images_folder = self.images_folder_edit.text()
         supported_formats = ['.jpg', '.jpeg', '.tif', '.tiff', '.png']
         image_count = 0
@@ -501,7 +514,7 @@ class OrthophotoWidget(QtWidgets.QWidget):
 
             if image_count == 0:
                 QtWidgets.QMessageBox.warning(self, "Ошибка", "В выбранной папке нет поддерживаемых изображений!")
-            return False
+                return False
 
         return True
 
@@ -511,38 +524,42 @@ class OrthophotoWidget(QtWidgets.QWidget):
             print("not Valid Inputs!")
             return
 
-        # Если указан файл телеметрии, запрашиваем настройки импорта
         telemetry_file = self.telemetry_file_edit.text() if self.telemetry_file_edit.text() else None
 
         if telemetry_file:
             dialog = TelemetrySettingsDialog(self)
             if dialog.exec_() != QtWidgets.QDialog.Accepted:
-                return  # Пользователь отменил
+                return
 
-            # Добавляем настройки телеметрии в общие настройки
             self.settings['telemetry_settings'] = dialog.get_settings()
 
-        # Изменение интерфейса
         self.start_btn.setEnabled(False)
+        self.images_folder_edit.setEnabled(False)
+        self.images_btn.setEnabled(False)
+        self.telemetry_file_edit.setEnabled(False)
+        self.telemetry_btn.setEnabled(False)
+        self.output_folder_edit.setEnabled(False)
+        self.output_btn.setEnabled(False)
+        self.settings_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.status_label.setText("Обработка...")
         self.status_label.setStyleSheet("color: #f39c12;")
+        self.project_name_edit.setEnabled(False)
 
-        # Создание и запуск потока обработки
         self.processor_thread = MetashapeProcessor(
             self.images_folder_edit.text(),
             telemetry_file,
             self.output_folder_edit.text(),
-            self.settings
+            self.settings,
+            self.get_project_path(),
+            self.project_name_edit.text().strip()
         )
 
-        # Подключение сигналов
         self.processor_thread.progress_updated.connect(self.update_progress)
         self.processor_thread.status_updated.connect(self.update_status)
         self.processor_thread.finished_successfully.connect(self.processing_finished)
 
-        # Запуск потока
         self.processor_thread.start()
 
     def update_progress(self, value):
@@ -613,10 +630,8 @@ def add_orthophoto_menu():
             print("Main window not found!")
             return
 
-        # Получаем менюбар
         menubar = main_window.menuBar()
 
-        # Создаем меню "Автоматизация" или добавляем в существующее
         automation_menu = None
         for action in menubar.actions():
             if action.text() == "Автоматизация":
@@ -626,7 +641,6 @@ def add_orthophoto_menu():
         if not automation_menu:
             automation_menu = menubar.addMenu("Автоматизация")
 
-        # Добавляем действие для ортофотоплана
         orthophoto_action = QtWidgets.QAction("Создать ортофотоплан", main_window)
         orthophoto_action.triggered.connect(show_orthophoto_dialog)
         automation_menu.addAction(orthophoto_action)
@@ -638,16 +652,5 @@ def add_orthophoto_menu():
         Metashape.app.messageBox(f"Ошибка добавления меню: {str(e)}")
 
 
-# Основная функция для добавления функциональности
-def add_orthophoto_tools():
-    """Добавление инструментов ортофотоплана в Metashape"""
-    print("Добавление инструментов ортофотоплана...")
 
-    add_orthophoto_menu()
-
-    Metashape.app.messageBox(
-        "Инструменты ортофотоплана добавлены!\n\n- Панель инструментов вверху\n- Меню 'Автоматизация' -> 'Создать ортофотоплан'")
-
-
-# Вызываем функцию для добавления инструментов
-add_orthophoto_tools()
+add_orthophoto_menu()
